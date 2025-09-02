@@ -1,0 +1,120 @@
+Linux (Ubuntu / RHEL / CentOS) — bash
+
+#!/usr/bin/env bash
+# prep_java_ctm_9021_linux.sh
+# Objectif: garantir Java 11/17 présent et définir BMC_INST_JAVA_HOME
+# Usage: sudo ./prep_java_ctm_9021_linux.sh [11|17]
+
+set -euo pipefail
+REQ="${1:-11}"   # 11 par défaut (compatible partout)
+
+need_root() { [ "$EUID" -ne 0 ] && { echo "Exécute en root/sudo."; exit 1; }; }
+
+pick_java_home() {
+  for d in \
+    /usr/lib/jvm/java-${REQ}-openjdk* \
+    /usr/lib/jvm/temurin-${REQ}-jre* \
+    /usr/lib/jvm/temurin-${REQ}-jdk* \
+    /usr/lib/jvm/java-${REQ}-adoptopenjdk* \
+    /usr/lib/jvm/java-${REQ}-ibm* \
+    /usr/lib/jvm/*"${REQ}"*; do
+    [ -x "$d/bin/java" ] && echo "$d" && return 0
+  done
+  return 1
+}
+
+install_java() {
+  echo "Installation de Java $REQ..."
+  if command -v apt >/dev/null 2>&1; then
+    apt update -y
+    apt install -y "openjdk-${REQ}-jre-headless" || apt install -y "openjdk-${REQ}-jre"
+  elif command -v dnf >/dev/null 2>&1; then
+    dnf install -y "java-${REQ}-openjdk-headless" || dnf install -y "java-${REQ}-openjdk"
+  elif command -v yum >/dev/null 2>&1; then
+    yum install -y "java-${REQ}-openjdk-headless" || yum install -y "java-${REQ}-openjdk"
+  else
+    echo "Gestionnaire de paquets non détecté. Installe Java $REQ manuellement." >&2
+    exit 1
+  fi
+}
+
+need_root
+
+JH="$(pick_java_home || true)"
+if [ -z "${JH:-}" ]; then
+  install_java
+  JH="$(pick_java_home)"
+fi
+
+"$JH/bin/java" -version 2>&1 | grep -E 'version "1?1\.|version "17\.' >/dev/null || {
+  echo "Java trouvé non conforme. Veuillez installer Java 11 ou 17." >&2; exit 1; }
+
+# Rendre dispo pour l'install Control-M
+export BMC_INST_JAVA_HOME="$JH"
+echo "export BMC_INST_JAVA_HOME=\"$JH\"" >/etc/profile.d/ctm_java.sh
+chmod 0644 /etc/profile.d/ctm_java.sh
+
+echo "OK: BMC_INST_JAVA_HOME=$BMC_INST_JAVA_HOME"
+
+
+---
+
+Windows — PowerShell (admin)
+
+# prep_java_ctm_9021_windows.ps1
+# Objectif: valider Java 11/17 et définir BMC_INST_JAVA_HOME (variable système)
+# Usage: PowerShell (Admin) :
+#   .\prep_java_ctm_9021_windows.ps1 -JavaHome "C:\Program Files\Eclipse Adoptium\jre-11"
+
+param(
+  [Parameter(Mandatory=$true)] [string]$JavaHome
+)
+
+$java = Join-Path $JavaHome "bin\java.exe"
+if (-not (Test-Path $java)) { Write-Error "java.exe introuvable sous $JavaHome\bin"; exit 1 }
+
+$verOut = & $java -XshowSettings:properties -version 2>&1 | Out-String
+if ($verOut -notmatch 'java\.version = (11|17)\.') {
+  Write-Error "Java 11 ou 17 requis. Version détectée : `n$verOut"
+  exit 1
+}
+
+[Environment]::SetEnvironmentVariable("BMC_INST_JAVA_HOME", $JavaHome, "Machine")
+# (Optionnel) garder JAVA_HOME aligné :
+[Environment]::SetEnvironmentVariable("JAVA_HOME", $JavaHome, "Machine")
+
+Write-Host "OK: BMC_INST_JAVA_HOME=$JavaHome (niveau Système). Redémarre la session PowerShell/cmd avant d'installer l'agent."
+
+
+---
+
+AIX — ksh
+
+#!/usr/bin/ksh
+# prep_java_ctm_9021_aix.ksh
+# Objectif: valider Java 11 et définir BMC_INST_JAVA_HOME
+# Usage: su - ; ./prep_java_ctm_9021_aix.ksh [/usr/java11_64]
+
+set -e
+JH="${1:-/usr/java11_64}"
+
+if [ ! -x "$JH/bin/java" ]; then
+  echo "Java 11 non trouvé à $JH. Installez/activez Java 11 (IBM Semeru) puis relancez." >&2
+  exit 1
+fi
+
+"$JH/bin/java" -version 2>&1 | grep 'version "11\.' >/dev/null || {
+  echo "Java 11 requis sur AIX. Version détectée non conforme." >&2; exit 1; }
+
+# Définir pour tous les shells (profil système) :
+if [ -w /etc/environment ]; then
+  grep -q '^BMC_INST_JAVA_HOME=' /etc/environment 2>/dev/null \
+    && sed "s|^BMC_INST_JAVA_HOME=.*|BMC_INST_JAVA_HOME=$JH|" -i /etc/environment \
+    || echo "BMC_INST_JAVA_HOME=$JH" >> /etc/environment
+fi
+
+# Et pour la session courante :
+export BMC_INST_JAVA_HOME="$JH"
+echo "OK: BMC_INST_JAVA_HOME=$BMC_INST_JAVA_HOME"
+echo "Reconnectez-vous pour que /etc/environment soit pris en compte par tous les utilisateurs."
+
