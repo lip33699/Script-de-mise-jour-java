@@ -1,0 +1,170 @@
+# ================= Java preparation for Control-M 9.0.21.x =================
+# Ensures Java 11/17 is present and sets BMC_INST_JAVA_HOME.
+# Linux: tries dnf/yum to install OpenJDK if missing.
+# AIX: uses /usr/java11_64 or optional AIX_JAVA_FILES_DIR with installp images.
+
+ensure_java() {
+  CTM_JAVA_VERSION="${CTM_JAVA_VERSION:-11}"    # FR: définit la version par défaut (11) si non fournie
+                                               # EN: sets default version (11) if not provided
+  case "$(uname -s)" in                        # FR: détecte le système avec uname -s
+                                               # EN: detects the OS with uname -s
+    Linux) ensure_java_linux ;;                # FR: si Linux, appelle ensure_java_linux
+                                               # EN: if Linux, calls ensure_java_linux
+    AIX)   ensure_java_aix ;;                  # FR: si AIX, appelle ensure_java_aix
+                                               # EN: if AIX, calls ensure_java_aix
+    *)     echo "OS non supporté pour l'installation automatique de Java." >&2 ;;  
+                                               # FR: tout autre OS = message d'erreur
+                                               # EN: any other OS = error message
+  esac
+}
+
+ensure_java_linux() {
+  if [ -n "${BMC_INST_JAVA_HOME}" ] && [ -x "${BMC_INST_JAVA_HOME}/bin/java" ]; then :; else
+    # FR: si BMC_INST_JAVA_HOME est défini et contient un java exécutable, on ne fait rien
+    # EN: if BMC_INST_JAVA_HOME points to a valid java binary, do nothing
+    for J in /usr/lib/jvm/java-${CTM_JAVA_VERSION}-openjdk* /usr/lib/jvm/temurin-${CTM_JAVA_VERSION}-jre* /usr/lib/jvm/temurin-${CTM_JAVA_VERSION}-jdk* ; do
+      [ -x "$J/bin/java" ] && export BMC_INST_JAVA_HOME="$J" && break
+      # FR: teste des répertoires standards, si java trouvé => définit BMC_INST_JAVA_HOME et arrête la boucle
+      # EN: checks standard directories, if java found => sets BMC_INST_JAVA_HOME and breaks
+    done
+  fi
+
+  if [ ! -x "${BMC_INST_JAVA_HOME}/bin/java" ]; then
+    # FR: si aucun java trouvé, tentative d'installation avec dnf ou yum
+    # EN: if no java found, tries to install using dnf or yum
+    if command -v dnf >/dev/null 2>&1 ; then
+      sudo dnf install -y "java-${CTM_JAVA_VERSION}-openjdk-headless" || sudo dnf install -y "java-${CTM_JAVA_VERSION}-openjdk"
+    elif command -v yum >/dev/null 2>&1 ; then
+      sudo yum install -y "java-${CTM_JAVA_VERSION}-openjdk-headless" || sudo yum install -y "java-${CTM_JAVA_VERSION}-openjdk"
+    else
+      echo "Installez Java ${CTM_JAVA_VERSION} manuellement (ni dnf ni yum)." >&2
+      # FR: si ni dnf ni yum disponibles, message d'erreur pour installation manuelle
+      # EN: if neither dnf nor yum available, error message asking manual install
+    fi
+
+    if command -v java >/dev/null 2>&1 ; then
+      JAVABIN="$(command -v java)"
+      REALBIN="$(readlink -f "$JAVABIN" 2>/dev/null || echo "$JAVABIN")"
+      export BMC_INST_JAVA_HOME="$(dirname "$(dirname "$REALBIN")")"
+      # FR: trouve le binaire java dans le PATH, suit les liens symboliques, déduit JAVA_HOME et l'exporte
+      # EN: finds java binary in PATH, resolves symlinks, deduces JAVA_HOME and exports it
+    fi
+  fi
+
+  if [ ! -x "${BMC_INST_JAVA_HOME}/bin/java" ]; then
+    echo "ERREUR: Java introuvable. Définissez BMC_INST_JAVA_HOME." >&2; exit 1
+    # FR: si encore aucun java valide, erreur fatale
+    # EN: if still no valid java, fatal error
+  fi
+
+  "${BMC_INST_JAVA_HOME}/bin/java" -version 2>&1 | grep -E 'version "1?1\.|version "17\.' >/dev/null || { echo "ERREUR: Java 11/17 requis."; exit 1; }
+  # FR: vérifie que la version est bien 11 ou 17, sinon erreur
+  # EN: checks that version is 11 or 17, otherwise error
+
+  echo "OK Java Linux: $BMC_INST_JAVA_HOME"
+  # FR: affiche un message de succès avec le chemin retenu
+  # EN: prints success message with chosen path
+}
+
+ensure_java_aix() {
+  if [ -z "${BMC_INST_JAVA_HOME}" ] || [ ! -x "${BMC_INST_JAVA_HOME}/bin/java" ]; then
+    [ -x /usr/java11_64/bin/java ] && export BMC_INST_JAVA_HOME="/usr/java11_64"
+    # FR: si variable vide, teste le chemin standard AIX (/usr/java11_64)
+    # EN: if variable empty, checks default AIX path (/usr/java11_64)
+  fi
+
+  if [ ! -x "${BMC_INST_JAVA_HOME}/bin/java" ] && [ -n "${AIX_JAVA_FILES_DIR}" ]; then
+    # FR: si pas de java trouvé et AIX_JAVA_FILES_DIR défini, tentative d'installation avec installp
+    # EN: if no java found and AIX_JAVA_FILES_DIR set, tries installation with installp
+    if command -v installp >/dev/null 2>&1 ; then
+      echo "Installation Java 11 via installp depuis ${AIX_JAVA_FILES_DIR} ..."
+      sudo installp -aY -d "${AIX_JAVA_FILES_DIR}" all || true
+    fi
+    [ -x /usr/java11_64/bin/java ] && export BMC_INST_JAVA_HOME="/usr/java11_64"
+    # FR: après tentative, re-teste /usr/java11_64
+    # EN: after attempt, re-check /usr/java11_64
+  fi
+
+  if [ ! -x "${BMC_INST_JAVA_HOME}/bin/java" ]; then
+    echo "ERREUR: Java 11 non disponible sur AIX. Installez IBM Semeru (Java 11)." >&2; exit 1
+    # FR: si toujours pas de java, erreur fatale demandant IBM Semeru Java 11
+    # EN: if still no java, fatal error asking to install IBM Semeru Java 11
+  fi
+
+  "${BMC_INST_JAVA_HOME}/bin/java" -version 2>&1 | grep 'version "11\.' >/dev/null || { echo "ERREUR: AIX requiert Java 11."; exit 1; }
+  # FR: vérifie que la version est bien 11.x (pas 17 sur AIX)
+  # EN: checks that version is 11.x (not 17 on AIX)
+
+  echo "OK Java AIX: $BMC_INST_JAVA_HOME"
+  # FR: affiche un message de succès avec le chemin retenu
+  # EN: prints success message with chosen path
+}
+
+
+Ce script prépare l’environnement Java nécessaire à l’installation de l’agent Control-M 9.0.21.x (dont la version 9.0.21.300).
+Comme cette version n’embarque plus de JRE, il faut vérifier que Java est disponible sur la machine.
+
+Le script fait donc :
+
+Détection de l’OS : regarde si on est sous Linux ou AIX.
+
+Linux :
+
+Cherche Java 11 ou 17 dans les répertoires standards.
+
+Si absent, tente de l’installer automatiquement via dnf (RHEL 8/9) ou yum (RHEL 7).
+
+Si trouvé, définit la variable BMC_INST_JAVA_HOME qui sera utilisée par l’installeur de Control-M.
+
+Vérifie que la version est bien 11 ou 17.
+
+AIX :
+
+Cherche Java 11 dans le chemin standard /usr/java11_64.
+
+Si absent mais qu’un dossier de packages est fourni (AIX_JAVA_FILES_DIR), tente l’installation via installp.
+
+Vérifie que la version est bien Java 11 (pas 17).
+
+Contrôle final :
+
+Si Java n’est pas trouvé ou si la version n’est pas supportée → arrêt avec erreur.
+
+Sinon, affiche un message de succès avec le chemin retenu.
+
+En résumé, il s’assure qu’un Java supporté est présent et configure la variable d’environnement obligatoire BMC_INST_JAVA_HOME, sans laquelle l’agent Control-M ne peut pas être installé.
+
+ In English
+
+This script prepares the Java environment required for installing the Control-M Agent 9.0.21.x (including version 9.0.21.300).
+Since this release no longer ships with an embedded JRE, we must ensure that Java is available on the host.
+
+The script does the following:
+
+OS detection: checks if the system is Linux or AIX.
+
+On Linux:
+
+Searches for Java 11 or 17 in standard directories.
+
+If not found, attempts to install automatically using dnf (RHEL 8/9) or yum (RHEL 7).
+
+If found, sets the environment variable BMC_INST_JAVA_HOME, required by the Control-M installer.
+
+Verifies the version is 11 or 17.
+
+On AIX:
+
+Looks for Java 11 in the standard path /usr/java11_64.
+
+If missing but a package directory (AIX_JAVA_FILES_DIR) is provided, tries to install via installp.
+
+Ensures the version is Java 11 (not 17).
+
+Final check:
+
+If Java is missing or unsupported → exit with an error.
+
+Otherwise, print a success message with the chosen path.
+
+In short, it ensures that a supported Java is present and configures the mandatory environment variable BMC_INST_JAVA_HOME, without which the Control-M Agent cannot be installed.
